@@ -4,18 +4,18 @@ languages:
 - csharp
 products:
 - azure
-services: Sql
-platforms: dotnet
-author: yaohaizh
+extensions:
+- services: Sql
+- platforms: dotnet
 ---
 
 # Getting started with recover and restore operations for SQL databases in C# #
 
-          Azure SQL sample for managing point in time restore and recover a deleted SQL Database -
-           - Create a SQL Server with two database from a pre-existing sample.
-           - Create a new database from a point in time restore
-           - Delete a database then restore it from a recoverable dropped database automatic backup
-           - Delete databases and SQL Server
+ Azure SQL sample for managing point in time restore and recover a deleted SQL Database -
+  - Create a SQL Server with two database from a pre-existing sample.
+  - Create a new database from a point in time restore
+  - Delete a database then restore it from a recoverable dropped database automatic backup
+  - Delete databases and SQL Server
 
 
 ## Running this Sample ##
