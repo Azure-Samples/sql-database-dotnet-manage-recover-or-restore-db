@@ -7,6 +7,7 @@ products:
 extensions:
 - services: Sql
 - platforms: dotnet
+description: "Azure SQL sample for managing point in time restore and recover a deleted SQL Database."
 ---
 
 # Getting started with recover and restore operations for SQL databases in C# #
