@@ -5,8 +5,8 @@ languages:
 products:
 - azure
 extensions:
-- services: Sql
-- platforms: dotnet
+  services: Sql
+  platforms: dotnet
 ---
 
 # Getting started with recover and restore operations for SQL databases in C# #
