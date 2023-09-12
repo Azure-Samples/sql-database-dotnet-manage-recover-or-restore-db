@@ -1,24 +1,22 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
-using Microsoft.Azure.Management.Fluent;
-using Microsoft.Azure.Management.ResourceManager.Fluent;
-using Microsoft.Azure.Management.ResourceManager.Fluent.Core;
-using Microsoft.Azure.Management.Samples.Common;
-using Microsoft.Azure.Management.Sql.Fluent;
-using Microsoft.Azure.Management.Sql.Fluent.Models;
+using Azure;
+using Azure.Core;
+using Azure.Identity;
+using Azure.ResourceManager.Samples.Common;
+using Azure.ResourceManager.Resources;
+using Azure.ResourceManager;
+using Azure.ResourceManager.Sql;
+using Azure.ResourceManager.Sql.Models;
+using System.Collections.Generic;
 using System;
 
 namespace ManageSqlWithRecoveredOrRestoredDatabase
 {
     public class Program
     {
-        private static readonly string sqlServerName = SdkContext.RandomResourceName("sqlserver", 20);
-        private static readonly string rgName = SdkContext.RandomResourceName("rgsql", 20);
-        private static readonly string administratorLogin = "sqladmin3423";
-        private static readonly string administratorPassword = Utilities.CreatePassword();
-        private static readonly string dbToDeleteName = "db-to-delete";
-        private static readonly string dbToRestoreName = "db-to-restore";
+        private static ResourceIdentifier? _resourceGroupId = null;
 
         /**
          * Azure SQL sample for managing point in time restore and recover a deleted SQL Database -
@@ -27,105 +25,140 @@ namespace ManageSqlWithRecoveredOrRestoredDatabase
          *  - Delete a database then restore it from a recoverable dropped database automatic backup
          *  - Delete databases and SQL Server
          */
-        public static void RunSample(IAzure azure)
+        public static async Task RunSample(ArmClient client)
         {
             try
             {
+                //Get default subscription
+                SubscriptionResource subscription = await client.GetDefaultSubscriptionAsync();
+
+                //Create a resource group in the EastUS region
+                string rgName = Utilities.CreateRandomName("rgSQLServer");
+                Utilities.Log("Creating resource group...");
+                var rgLro = await subscription.GetResourceGroups().CreateOrUpdateAsync(WaitUntil.Completed, rgName, new ResourceGroupData(AzureLocation.EastUS));
+                ResourceGroupResource resourceGroup = rgLro.Value;
+                _resourceGroupId = resourceGroup.Id;
+                Utilities.Log($"Created a resource group with name: {resourceGroup.Data.Name} ");
+
                 // ============================================================
                 // Create a SQL Server with two databases from a sample.
                 Utilities.Log("Creating a SQL Server with two databases from a sample.");
-                var sqlServer = azure.SqlServers.Define(sqlServerName)
-                    .WithRegion(Region.USEast2)
-                    .WithNewResourceGroup(rgName)
-                    .WithAdministratorLogin(administratorLogin)
-                    .WithAdministratorPassword(administratorPassword)
-                    .DefineDatabase(dbToDeleteName)
-                        .FromSample(SampleName.AdventureWorksLT)
-                        .WithStandardEdition(SqlDatabaseStandardServiceObjective.S0)
-                        .Attach()
-                    .DefineDatabase(dbToRestoreName)
-                        .FromSample(SampleName.AdventureWorksLT)
-                        .WithStandardEdition(SqlDatabaseStandardServiceObjective.S0)
-                        .Attach()
-                    .Create();
-                Utilities.PrintSqlServer(sqlServer);
+                string sqlServerName = Utilities.CreateRandomName("sqlserver");
+                Utilities.Log("Creating SQL Server...");
+                string sqlAdmin = "sqladmin" + sqlServerName;
+                string sqlAdminPwd = Utilities.CreatePassword();
+                SqlServerData sqlData = new SqlServerData(AzureLocation.EastUS)
+                {
+                    AdministratorLogin = sqlAdmin,
+                    AdministratorLoginPassword = sqlAdminPwd
+                };
+                var sqlServerLro = await resourceGroup.GetSqlServers().CreateOrUpdateAsync(WaitUntil.Completed, sqlServerName, sqlData);
+                SqlServerResource sqlServer = sqlServerLro.Value;
+                Utilities.Log($"Created a SQL Server with name: {sqlServer.Data.Name} ");
 
-                // Sleep for 5 minutes to allow for the service to be aware of the new server and databases
-                SdkContext.DelayProvider.Delay(5 * 60 * 1000);
+                Utilities.Log("Creating first database...");
+                string dbToDeleteName = Utilities.CreateRandomName("db-to-delete");
+                SqlDatabaseData DBData = new SqlDatabaseData(AzureLocation.EastUS) { };
+                SqlDatabaseResource dbToDelete = (await sqlServer.GetSqlDatabases().CreateOrUpdateAsync(WaitUntil.Completed, dbToDeleteName, DBData)).Value;
+                Utilities.Log($"Created first database with name: {dbToDelete.Data.Name} ");
 
-                var dbToBeDeleted = sqlServer.Databases
-                    .Get(dbToDeleteName);
-                Utilities.PrintDatabase(dbToBeDeleted);
-                var dbToRestore = sqlServer.Databases
-                    .Get(dbToRestoreName);
-                Utilities.PrintDatabase(dbToRestore);
+                Utilities.Log("Creating second database...");
+                string dbToRestoreName = Utilities.CreateRandomName("db-to-restore");
+                SqlDatabaseResource dbToRestore = (await sqlServer.GetSqlDatabases().CreateOrUpdateAsync(WaitUntil.Completed, dbToRestoreName, DBData)).Value;
+                Utilities.Log($"Created second database with name: {dbToRestore.Data.Name} ");
+
+                //Sleep for 5 minutes to allow for the service to be aware of the new server and databases
+
+                Utilities.Log("Sleep for 5 minutes to allow for the service to be aware of the new server and databases");
+                Thread.Sleep(TimeSpan.FromMinutes(5));
 
                 // ============================================================
-                // Loop until a point in time restore is available.
+                //Loop until a point in time restore is available. 
                 Utilities.Log("Loop until a point in time restore is available.");
 
                 int retries = 50;
-                while (retries > 0 && dbToRestore.ListRestorePoints().Count == 0)
+                while (retries > 0 && dbToRestore.GetSqlServerDatabaseRestorePoints().ToList().Count == 0)
                 {
                     retries--;
                     // Sleep for about 3 minutes
-                    SdkContext.DelayProvider.Delay(3 * 60 * 1000);
+                    Utilities.Log("get the point in time restore retry");
+                    Thread.Sleep(TimeSpan.FromMinutes(3));
                 }
                 if (retries == 0)
                 {
                     return;
                 }
 
-                var restorePointInTime = dbToRestore.ListRestorePoints()[0];
+                Utilities.Log("list the restorepoint of database");
+
                 // Restore point might not be ready right away and we will have to wait for it.
-                long waitForRestoreToBeReady = (long) ((System.TimeSpan)restorePointInTime.EarliestRestoreDate.GetValueOrDefault().Subtract(DateTime.Now.ToUniversalTime())).TotalMilliseconds + 300000;
+                Utilities.Log("Restore point might not be ready right away and we will have to wait for it");
+                long waitForRestoreToBeReady = (long)((System.TimeSpan)dbToRestore.GetSqlServerDatabaseRestorePoints().ToList()[0].Data.EarliestRestoreOn.GetValueOrDefault().Subtract(DateTime.Now.ToUniversalTime())).TotalMilliseconds + 300000;
                 if (waitForRestoreToBeReady > 0)
                 {
-                    SdkContext.DelayProvider.Delay((int)waitForRestoreToBeReady);
+                    Thread.Sleep(Convert.ToInt32(waitForRestoreToBeReady));
                 }
 
-                var dbRestorePointInTime = sqlServer.Databases
-                    .Define("db-restore-pit")
-                    .FromRestorePoint(restorePointInTime)
-                    .Create();
-                Utilities.PrintDatabase(dbRestorePointInTime);
-                dbRestorePointInTime.Delete();
+                var getRestorePointTime = dbToRestore.GetSqlServerDatabaseRestorePoints().ToList()[0];
+                Utilities.Log("Creating a PointInTimeRestore database...");
+                var dbRestorePointData = new SqlDatabaseData(getRestorePointTime.Data.Location ?? AzureLocation.EastUS)// When createMode is PointInTimeRestore, sourceResourceId must be the resource ID of the existing database or existing sql pool, and restorePointInTime must be specified.
+                {
+                    CreateMode = SqlDatabaseCreateMode.PointInTimeRestore,
+                    SourceResourceId = dbToRestore.Id,
+                    RestorePointInTime = getRestorePointTime.Data.EarliestRestoreOn
+                };
+                string dbRestorePointName = Utilities.CreateRandomName("db-restore-pit");
+                var dbRestorePoint = (await sqlServer.GetSqlDatabases().CreateOrUpdateAsync(WaitUntil.Completed, dbRestorePointName, dbRestorePointData)).Value;
+                Utilities.Log($"Created a PointInTimeRestore database with name: {dbRestorePoint.Data.Name}");
+                await dbRestorePoint.DeleteAsync(WaitUntil.Completed);
 
                 // ============================================================
                 // Delete the database than loop until the restorable dropped database backup is available.
                 Utilities.Log("Deleting the database than loop until the restorable dropped database backup is available.");
 
-                dbToBeDeleted.Delete();
-                retries = 24;
-                while (retries > 0 && sqlServer.ListRestorableDroppedDatabases().Count == 0)
+                await dbToDelete.DeleteAsync(WaitUntil.Completed);
+                int dropretries = 24;
+                while (dropretries > 0 && sqlServer.GetRestorableDroppedDatabases().ToList().Count == 0)
                 {
-                    retries--;
+                    dropretries--;
                     // Sleep for about 5 minutes
-                    SdkContext.DelayProvider.Delay(5 * 60 * 1000);
+                    Thread.Sleep(TimeSpan.FromMinutes(5));
                 }
-                var restorableDroppedDatabase = sqlServer.ListRestorableDroppedDatabases()[0];
-                var dbRestoreDeleted = sqlServer.Databases
-                    .Define("db-restore-deleted")
-                    .FromRestorableDroppedDatabase(restorableDroppedDatabase)
-                    .Create();
-                Utilities.PrintDatabase(dbRestoreDeleted);
+                var restorableDroppedDatabase = sqlServer.GetRestorableDroppedDatabases().ToList()[0];
+                Utilities.Log("Restore a restorable dropped database...");
+                var restoredata = new SqlDatabaseData(restorableDroppedDatabase.Data.Location)// When createMode is Restore, sourceResourceId must be the resource ID of restorable dropped database or restorable dropped sql pool.
+                {
+                    CreateMode = SqlDatabaseCreateMode.Restore,
+                    SourceResourceId = restorableDroppedDatabase.Data.Id,
+                    MaxSizeBytes = restorableDroppedDatabase.Data.MaxSizeBytes,
+                    Tags =
+                    {
+                        ["key1"]="restorableDroppedDatabase"
+                    }
+                };
+                var dbRestoreDeletedName = Utilities.CreateRandomName("db-restore-deleted");
+                var dbRestoreDeleted = (await sqlServer.GetSqlDatabases().CreateOrUpdateAsync(WaitUntil.Completed, dbRestoreDeletedName, restoredata)).Value;
+                Utilities.Log($"Restored a database with name {dbRestoreDeleted.Data.Name}");
 
                 // Delete databases
-                dbToRestore.Delete();
-                dbRestoreDeleted.Delete();
+                await dbToRestore.DeleteAsync(WaitUntil.Completed);
+                await dbRestoreDeleted.DeleteAsync(WaitUntil.Completed);
 
                 // Delete the SQL Server.
                 Utilities.Log("Deleting a Sql Server");
-                azure.SqlServers.DeleteById(sqlServer.Id);
+                await sqlServer.DeleteAsync(WaitUntil.Completed);
 
             }
             finally
             {
                 try
                 {
-                    Utilities.Log("Deleting Resource Group: " + rgName);
-                    azure.ResourceGroups.DeleteByName(rgName);
-                    Utilities.Log("Deleted Resource Group: " + rgName);
+                    if (_resourceGroupId is not null)
+                    {
+                        Utilities.Log($"Deleting Resource Group...");
+                        await client.GetResourceGroupResource(_resourceGroupId).DeleteAsync(WaitUntil.Completed);
+                        Utilities.Log($"Deleted Resource Group: {_resourceGroupId.Name}");
+                    }
                 }
                 catch (Exception e)
                 {
@@ -133,24 +166,20 @@ namespace ManageSqlWithRecoveredOrRestoredDatabase
                 }
             }
         }
-        public static void Main(string[] args)
+        public static async Task Main(string[] args)
         {
             try
             {
                 //=================================================================
                 // Authenticate
-                var credentials = SdkContext.AzureCredentialsFactory.FromFile(Environment.GetEnvironmentVariable("AZURE_AUTH_LOCATION"));
+                var clientId = Environment.GetEnvironmentVariable("CLIENT_ID");
+                var clientSecret = Environment.GetEnvironmentVariable("CLIENT_SECRET");
+                var tenantId = Environment.GetEnvironmentVariable("TENANT_ID");
+                var subscription = Environment.GetEnvironmentVariable("SUBSCRIPTION_ID");
+                ClientSecretCredential credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+                ArmClient client = new ArmClient(credential, subscription);
 
-                var azure = Azure
-                    .Configure()
-                    .WithLogLevel(HttpLoggingDelegatingHandler.Level.Basic)
-                    .Authenticate(credentials)
-                    .WithDefaultSubscription();
-
-                // Print selected subscription
-                Utilities.Log("Selected subscription: " + azure.SubscriptionId);
-
-                RunSample(azure);
+                await RunSample(client);
             }
             catch (Exception e)
             {
